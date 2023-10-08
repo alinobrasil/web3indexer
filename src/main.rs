@@ -79,12 +79,15 @@ impl<'r> Responder<'r> for ApiError {
 
 
 
-#[get("/fetchdata")]
-fn fetchdata() -> Either<Json<Vec<Log>>, ApiError> {
+#[get("/fetchdata?<target_address>&<start_block>&<end_block>")]
+fn fetchdata(target_address: String,
+    start_block: u64,
+    end_block: u64
+) -> Either<Json<Vec<Log>>, ApiError> {
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let target_address = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string().to_lowercase();
-    let start_block = 18277200;
-    let end_block = 18277210;
+    // let target_address = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string().to_lowercase();
+    // let start_block = 18277200;
+    // let end_block = 18277210;
 
     let result = runtime.block_on(fetch_chain_data(start_block, end_block, target_address));
 
