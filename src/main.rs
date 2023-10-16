@@ -1,117 +1,104 @@
 #![feature(proc_macro_hygiene, decl_macro)]
 
-#[macro_use] extern crate rocket;
-#[macro_use] extern crate serde_derive;
+#[macro_use]
+extern crate rocket;
+#[macro_use]
+extern crate serde_derive;
 extern crate rocket_contrib;
-mod chain_data;
-use chain_data::fetch_chain_data;
-use chain_data::{Log};
-
-use rocket_contrib::json::Json;
-use rocket::response::Responder;
-use rocket::{response, Response};
 use rocket::http::Status;
-use rocket::Request;
-use std::io::Cursor;
-use std::fmt;
-use serde::Serialize;
+use rocket::State;
+use rocket_contrib::json::Json;
+use std::collections::HashMap;
+use std::env;
+use tokio::sync::Mutex;
+use uuid::Uuid;
+mod chain_data;
+use chain_data::{fetch_chain_data, Log};
 
 use dotenv::dotenv;
+use serde::Serialize;
 
-impl fmt::Display for ApiError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "API Error: {}", self.message)
-    }
+type TaskId = Uuid;
+type TaskStatus = Result<Vec<Log>, String>;
+
+struct Config {
+    infura_url: String,
+    target_address: String,
 }
 
-
-enum Either<A, B> {
-    A(A),
-    B(B),
+struct AppState {
+    client: reqwest::Client,
+    config: Config,
+    tasks: Mutex<HashMap<TaskId, TaskStatus>>,
 }
 
-impl<'r, A: Responder<'r>, B: Responder<'r>> Responder<'r> for Either<A, B> {
-    fn respond_to(self, req: &rocket::Request) -> rocket::response::Result<'r> {
-        match self {
-            Either::A(a) => a.respond_to(req),
-            Either::B(b) => b.respond_to(req),
-        }
-    }
-}
-
-
-// Define the data structures for our endpoints
 #[derive(Serialize, Deserialize)]
 struct ResultNumber {
     result: i32,
 }
 
-#[derive(Serialize, Deserialize)]
-struct ResultString {
-    result: String,
-}
-
-
-#[derive(Serialize, Deserialize, Debug)]
-struct ErrorResponse {
-    error: String,
-}
-
-#[derive(Debug)]
+#[derive(Serialize, Debug)]
 pub struct ApiError {
     message: String,
 }
 
-impl<'r> Responder<'r> for ApiError {
-    fn respond_to(self, _: &Request) -> rocket::response::Result<'r> {
-        // For simplicity, we'll convert the error to a string and return it as a plain text response with a 400 status code
-        // Customize as needed!
-        response::Response::build()
-            .status(rocket::http::Status::BadRequest)
-            .header(rocket::http::ContentType::Plain)
-            .sized_body(std::io::Cursor::new(self.to_string()))
-            .ok()
-    }
-}
-
-
-
-
-
-
-#[get("/fetchdata?<target_address>&<start_block>&<end_block>")]
-fn fetchdata(target_address: String,
+#[get("/fetchdata?<start_block>&<end_block>")]
+async fn fetchdata(
+    state: &State<AppState>,
     start_block: u64,
-    end_block: u64
-) -> Either<Json<Vec<Log>>, ApiError> {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    // let target_address = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string().to_lowercase();
-    // let start_block = 18277200;
-    // let end_block = 18277210;
+    end_block: u64,
+) -> Result<Json<Vec<Log>>, (Status, String)> {
+    let client = &state.client;
+    let config = &state.config;
 
-    let result = runtime.block_on(fetch_chain_data(start_block, end_block, target_address));
+    let target_address: String = config.target_address.clone();
 
-    match result {
-        Ok(logs) => Either::A(Json(logs)),
-        Err(e) => Either::B(ApiError { message: e.to_string() }),
+    match fetch_chain_data(start_block, end_block, target_address, client).await {
+        Ok(logs) => Ok(Json(logs)),
+        Err(e) => Err((Status::BadRequest, e.to_string())),
     }
 }
 
+#[get("/checkdata?<task_id>")]
+async fn checkdata(task_id: Uuid, state: &State<AppState>) -> String {
+    let task_map = state.tasks.lock().await;
+    match task_map.get(&task_id) {
+        Some(Ok(logs)) => format!("Status: Complete\nData: {:?}", logs),
+        Some(Err(e)) => format!("Status: Error\nError: {}", e),
+        None => "Status: Running".to_string(),
+    }
+}
 
-
-
-// Endpoint to add two numbers (sample, to see that API is functional)
 #[get("/add?<a>&<b>")]
 fn add(a: i32, b: i32) -> Json<ResultNumber> {
-    Json(ResultNumber {
-        result: a + b,
-    })
+    Json(ResultNumber { result: a + b })
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     dotenv().ok();
-    rocket::ignite()
-        .mount("/", routes![add, fetchdata])
+
+    let client = reqwest::Client::new();
+
+    let tasks = Mutex::new(HashMap::new());
+
+    let config = Config {
+        infura_url: env::var("INFURA_URL")
+            .expect("INFURA_URL must be set")
+            .to_string(),
+        target_address: env::var("TARGET_ADDRESS")
+            .expect("TARGET_ADDRESS must be set")
+            .to_string()
+            .to_lowercase(),
+    };
+
+    let app_state = AppState {
+        client,
+        config,
+        tasks,
+    };
+
+    rocket::build()
+        .manage(app_state)
+        .mount("/", routes![add, fetchdata, checkdata])
         .launch();
 }
