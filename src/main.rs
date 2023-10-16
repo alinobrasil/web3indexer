@@ -9,18 +9,28 @@ use rocket::http::Status;
 use rocket::State;
 use rocket_contrib::json::Json;
 use std::collections::HashMap;
+use std::env;
 use tokio::sync::Mutex;
 use uuid::Uuid;
-
 mod chain_data;
-use chain_data::fetch_chain_data;
-use chain_data::Log;
+use chain_data::{fetch_chain_data, Log};
 
 use dotenv::dotenv;
 use serde::Serialize;
 
 type TaskId = Uuid;
 type TaskStatus = Result<Vec<Log>, String>;
+
+struct Config {
+    infura_url: String,
+    target_address: String,
+}
+
+struct AppState {
+    client: reqwest::Client,
+    config: Config,
+    tasks: Mutex<HashMap<TaskId, TaskStatus>>,
+}
 
 #[derive(Serialize, Deserialize)]
 struct ResultNumber {
@@ -32,18 +42,18 @@ pub struct ApiError {
     message: String,
 }
 
-#[derive(Clone)]
-struct AppState {
-    tasks: Mutex<HashMap<TaskId, TaskStatus>>,
-}
-
-#[get("/fetchdata?<target_address>&<start_block>&<end_block>")]
+#[get("/fetchdata?<start_block>&<end_block>")]
 async fn fetchdata(
-    target_address: String,
+    state: &State<AppState>,
     start_block: u64,
     end_block: u64,
 ) -> Result<Json<Vec<Log>>, (Status, String)> {
-    match fetch_chain_data(start_block, end_block, target_address).await {
+    let client = &state.client;
+    let config = &state.config;
+
+    let target_address: String = config.target_address.clone();
+
+    match fetch_chain_data(start_block, end_block, target_address, client).await {
         Ok(logs) => Ok(Json(logs)),
         Err(e) => Err((Status::BadRequest, e.to_string())),
     }
@@ -67,8 +77,24 @@ fn add(a: i32, b: i32) -> Json<ResultNumber> {
 fn main() {
     dotenv().ok();
 
+    let client = reqwest::Client::new();
+
+    let tasks = Mutex::new(HashMap::new());
+
+    let config = Config {
+        infura_url: env::var("INFURA_URL")
+            .expect("INFURA_URL must be set")
+            .to_string(),
+        target_address: env::var("TARGET_ADDRESS")
+            .expect("TARGET_ADDRESS must be set")
+            .to_string()
+            .to_lowercase(),
+    };
+
     let app_state = AppState {
-        tasks: Mutex::new(HashMap::new()),
+        client,
+        config,
+        tasks,
     };
 
     rocket::build()
